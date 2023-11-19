@@ -4,7 +4,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-trait ActorHandler<Req, Res> {
+pub trait ActorHandler<Req, Res> {
     fn handle(&mut self, request: Req) -> Res;
 }
 
@@ -20,13 +20,13 @@ impl<Res> Clone for ActorRefState<Res> {
 }
 
 #[derive(Clone)]
-struct ActorRef<Req, Res> {
+pub struct ActorRef<Req, Res> {
     tx: SyncSender<(Req, SyncSender<Res>)>,
     state: ActorRefState<Res>,
 }
 
 impl<Req, Res> ActorRef<Req, Res> {
-    pub fn new(tx: SyncSender<(Req, SyncSender<Res>)>) -> Self {
+    fn new(tx: SyncSender<(Req, SyncSender<Res>)>) -> Self {
         Self {
             tx,
             state: ActorRefState::Start,
@@ -34,7 +34,7 @@ impl<Req, Res> ActorRef<Req, Res> {
     }
 
     /// Blocking call till response is received
-    fn call_blocking(&self, req: Req) -> Res {
+    pub fn call_blocking(&self, req: Req) -> Res {
         let (tx, rx) = mpsc::sync_channel(1);
         // TODO, Handle this unwrap gracefully
         // * Ideally the Actor service SHOULD NOT stop before ActorRef
@@ -47,7 +47,7 @@ impl<Req, Res> ActorRef<Req, Res> {
 
     /// Periodic polling for actions to be performed
     /// Should be polled as frequently as possible
-    fn call_poll(&mut self, on_req: impl Fn() -> Req) -> Result<Option<Res>, String> {
+    pub fn call_poll(&mut self, on_req: impl Fn() -> Req) -> Result<Option<Res>, String> {
         match &self.state {
             ActorRefState::Start => {
                 let (tx, rx) = mpsc::sync_channel(1);
@@ -73,7 +73,7 @@ impl<Req, Res> ActorRef<Req, Res> {
     }
 }
 
-struct Actor<Req, Res> {
+pub struct Actor<Req, Res> {
     handle: JoinHandle<()>,
     request: PhantomData<Req>,
     response: PhantomData<Res>,
