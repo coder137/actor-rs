@@ -41,8 +41,7 @@ impl<Req, Res> ActorRef<Req, Res> {
         self.tx.send((req, tx)).unwrap();
         // TODO, Handle this unwrap gracefully
         // * Ideally the Actor service SHOULD NOT drop the tx channel
-        let res = rx.recv().unwrap();
-        res
+        rx.recv().unwrap()
     }
 
     /// Periodic polling for actions to be performed
@@ -89,15 +88,10 @@ where
         mut handler: impl ActorHandler<Req, Res> + Send + 'static,
     ) -> (Self, ActorRef<Req, Res>) {
         let (tx, rx) = mpsc::sync_channel::<(Req, SyncSender<Res>)>(bound);
-        let handle = thread::spawn(move || loop {
-            match rx.recv() {
-                Ok((request, tx)) => {
-                    let response = handler.handle(request);
-                    let _ = tx.send(response); // Don't care if the response was received or no
-                }
-                Err(_) => {
-                    break;
-                }
+        let handle = thread::spawn(move || {
+            while let Ok((request, tx)) = rx.recv() {
+                let response = handler.handle(request);
+                let _ = tx.send(response); // Don't care if the response was received or no
             }
         });
         (
@@ -111,7 +105,7 @@ where
     }
 
     pub fn join(self) {
-        let _ = self.handle.join().unwrap();
+        self.handle.join().unwrap();
     }
 
     // TODO, Actor shutdown
