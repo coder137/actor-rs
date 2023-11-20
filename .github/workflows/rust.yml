@@ -36,7 +36,7 @@ jobs:
       - name: Generate Coverage Report
         if: ${{ matrix.os == 'ubuntu-latest' }}
         run: |
-          cargo llvm-cov report --cobertura > cobertura.xml
+          cargo llvm-cov --cobertura > cobertura.xml
 
       - name: Upload coverage reports to Codecov
         if: ${{ matrix.os == 'ubuntu-latest' }}
