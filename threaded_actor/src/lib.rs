@@ -23,10 +23,18 @@ impl<Res> Clone for ActorRefState<Res> {
     }
 }
 
-#[derive(Clone)]
 pub struct ActorRef<Req, Res> {
     tx: Sender<(Req, Sender<Res>)>,
     state: ActorRefState<Res>,
+}
+
+impl<Req, Res> Clone for ActorRef<Req, Res> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            state: self.state.clone(),
+        }
+    }
 }
 
 impl<Req, Res> ActorRef<Req, Res> {
