@@ -1,7 +1,11 @@
 use std::{
     marker::PhantomData,
-    sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     thread::{self, JoinHandle},
+};
+
+use crossbeam::{
+    channel::{self, Receiver, Sender, TryRecvError, TrySendError},
+    select,
 };
 
 pub trait ActorHandler<Req, Res> {
@@ -21,12 +25,12 @@ impl<Res> Clone for ActorRefState<Res> {
 
 #[derive(Clone)]
 pub struct ActorRef<Req, Res> {
-    tx: SyncSender<(Req, SyncSender<Res>)>,
+    tx: Sender<(Req, Sender<Res>)>,
     state: ActorRefState<Res>,
 }
 
 impl<Req, Res> ActorRef<Req, Res> {
-    fn new(tx: SyncSender<(Req, SyncSender<Res>)>) -> Self {
+    fn new(tx: Sender<(Req, Sender<Res>)>) -> Self {
         Self {
             tx,
             state: ActorRefState::Start,
@@ -35,7 +39,7 @@ impl<Req, Res> ActorRef<Req, Res> {
 
     /// Blocking call till response is received
     pub fn call_blocking(&self, req: Req) -> Res {
-        let (tx, rx) = mpsc::sync_channel(1);
+        let (tx, rx) = channel::bounded(1);
         // TODO, Handle this unwrap gracefully
         // * Ideally the Actor service SHOULD NOT stop before ActorRef
         self.tx.send((req, tx)).unwrap();
@@ -49,7 +53,7 @@ impl<Req, Res> ActorRef<Req, Res> {
     pub fn call_poll(&mut self, on_req: impl Fn() -> Req) -> Result<Option<Res>, String> {
         match &self.state {
             ActorRefState::Start => {
-                let (tx, rx) = mpsc::sync_channel(1);
+                let (tx, rx) = channel::bounded(1);
                 let req = on_req();
                 match self.tx.try_send((req, tx)) {
                     Ok(_) => {
@@ -87,11 +91,25 @@ where
         bound: usize,
         mut handler: impl ActorHandler<Req, Res> + Send + 'static,
     ) -> (Self, ActorRef<Req, Res>) {
-        let (tx, rx) = mpsc::sync_channel::<(Req, SyncSender<Res>)>(bound);
+        let (user_tx, user_rx) = channel::bounded::<(Req, channel::Sender<Res>)>(bound);
+
         let handle = thread::spawn(move || {
-            while let Ok((request, tx)) = rx.recv() {
-                let response = handler.handle(request);
-                let _ = tx.send(response); // Don't care if the response was received or no
+            loop {
+                select! {
+                    recv(user_rx) -> msg => {
+                        match msg {
+                            Ok((request, tx)) => {
+                                let response = handler.handle(request);
+                                let _ = tx.send(response);
+                            },
+                            Err(e) => {
+                                println!("e : {e:?}");
+                                break;
+                            },
+                        }
+                    }
+                    // TODO, Add a command channel here
+                }
             }
         });
         (
@@ -100,7 +118,7 @@ where
                 request: PhantomData,
                 response: PhantomData,
             },
-            ActorRef::new(tx),
+            ActorRef::new(user_tx),
         )
     }
 
