@@ -1,7 +1,8 @@
-use std::{
-    marker::PhantomData,
-    sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
-    thread::{self, JoinHandle},
+use std::thread::{self, JoinHandle};
+
+use crossbeam::{
+    channel::{self, Receiver, Sender, TryRecvError, TrySendError},
+    select,
 };
 
 pub trait ActorHandler<Req, Res> {
@@ -19,14 +20,22 @@ impl<Res> Clone for ActorRefState<Res> {
     }
 }
 
-#[derive(Clone)]
 pub struct ActorRef<Req, Res> {
-    tx: SyncSender<(Req, SyncSender<Res>)>,
+    tx: Sender<(Req, Sender<Res>)>,
     state: ActorRefState<Res>,
 }
 
+impl<Req, Res> Clone for ActorRef<Req, Res> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            state: self.state.clone(),
+        }
+    }
+}
+
 impl<Req, Res> ActorRef<Req, Res> {
-    fn new(tx: SyncSender<(Req, SyncSender<Res>)>) -> Self {
+    fn new(tx: Sender<(Req, Sender<Res>)>) -> Self {
         Self {
             tx,
             state: ActorRefState::Start,
@@ -35,7 +44,7 @@ impl<Req, Res> ActorRef<Req, Res> {
 
     /// Blocking call till response is received
     pub fn call_blocking(&self, req: Req) -> Res {
-        let (tx, rx) = mpsc::sync_channel(1);
+        let (tx, rx) = channel::bounded(1);
         // TODO, Handle this unwrap gracefully
         // * Ideally the Actor service SHOULD NOT stop before ActorRef
         self.tx.send((req, tx)).unwrap();
@@ -49,7 +58,7 @@ impl<Req, Res> ActorRef<Req, Res> {
     pub fn call_poll(&mut self, on_req: impl Fn() -> Req) -> Result<Option<Res>, String> {
         match &self.state {
             ActorRefState::Start => {
-                let (tx, rx) = mpsc::sync_channel(1);
+                let (tx, rx) = channel::bounded(1);
                 let req = on_req();
                 match self.tx.try_send((req, tx)) {
                     Ok(_) => {
@@ -72,10 +81,18 @@ impl<Req, Res> ActorRef<Req, Res> {
     }
 }
 
+pub enum ActorCommandReq {
+    Shutdown,
+}
+
+pub enum ActorCommandRes {
+    Shutdown,
+}
+
 pub struct Actor<Req, Res> {
     handle: JoinHandle<()>,
-    request: PhantomData<Req>,
-    response: PhantomData<Res>,
+    user_actor_ref: ActorRef<Req, Res>,
+    command_actor_ref: ActorRef<ActorCommandReq, ActorCommandRes>,
 }
 
 impl<Req, Res> Actor<Req, Res>
@@ -83,32 +100,56 @@ where
     Req: Send + 'static,
     Res: Send + 'static,
 {
-    pub fn new(
-        bound: usize,
-        mut handler: impl ActorHandler<Req, Res> + Send + 'static,
-    ) -> (Self, ActorRef<Req, Res>) {
-        let (tx, rx) = mpsc::sync_channel::<(Req, SyncSender<Res>)>(bound);
-        let handle = thread::spawn(move || {
-            while let Ok((request, tx)) = rx.recv() {
-                let response = handler.handle(request);
-                let _ = tx.send(response); // Don't care if the response was received or no
+    pub fn new(bound: usize, mut handler: impl ActorHandler<Req, Res> + Send + 'static) -> Self {
+        let (user_tx, user_rx) = channel::bounded::<(Req, Sender<Res>)>(bound);
+
+        let (command_tx, command_rx) =
+            channel::bounded::<(ActorCommandReq, Sender<ActorCommandRes>)>(1);
+
+        let handle = thread::spawn(move || loop {
+            select! {
+                recv(user_rx) -> user_msg => {
+                    match user_msg {
+                        Ok((request, tx)) => {
+                            let response = handler.handle(request);
+                            let _ = tx.send(response);
+                        },
+                        Err(e) => {
+                            println!("e : {e:?}");
+                            break;
+                        },
+                    }
+                }
+                recv(command_rx) -> command_msg => {
+                    match command_msg {
+                        Ok((request, tx)) => {
+                            let response = match request {
+                                ActorCommandReq::Shutdown => ActorCommandRes::Shutdown,
+                            };
+                            let _ = tx.send(response);
+                        }
+                        Err(e) => {
+                            println!("e: {e:?}");
+                            break;
+                        }
+                    }
+                }
             }
         });
-        (
-            Self {
-                handle,
-                request: PhantomData,
-                response: PhantomData,
-            },
-            ActorRef::new(tx),
-        )
+        Self {
+            handle,
+            user_actor_ref: ActorRef::new(user_tx),
+            command_actor_ref: ActorRef::new(command_tx),
+        }
     }
 
-    pub fn join(self) {
-        self.handle.join().unwrap();
+    pub fn get_user_actor_ref(&self) -> ActorRef<Req, Res> {
+        self.user_actor_ref.clone()
     }
 
-    // TODO, Actor shutdown
+    pub fn get_command_actor_ref(&self) -> ActorRef<ActorCommandReq, ActorCommandRes> {
+        self.command_actor_ref.clone()
+    }
 }
 
 #[cfg(test)]
@@ -128,7 +169,8 @@ mod tests {
 
     #[test]
     fn test_ping() {
-        let (actor, actor_ref) = Actor::new(2, Ping);
+        let actor = Actor::new(2, Ping);
+        let actor_ref = actor.get_user_actor_ref();
         let prev = Instant::now();
         let _ = actor_ref.call_blocking(());
         let current = Instant::now();
@@ -141,13 +183,16 @@ mod tests {
             prev.elapsed()
         );
 
-        drop(actor_ref);
-        actor.join();
+        let res = actor
+            .get_command_actor_ref()
+            .call_blocking(ActorCommandReq::Shutdown);
+        assert!(matches!(res, ActorCommandRes::Shutdown));
     }
 
     #[test]
     fn test_ping_poll() {
-        let (actor, mut actor_ref) = Actor::new(2, Ping);
+        let actor = Actor::new(2, Ping);
+        let mut actor_ref = actor.get_user_actor_ref();
         let prev = Instant::now();
         loop {
             let res = actor_ref.call_poll(|| ());
@@ -170,13 +215,16 @@ mod tests {
             prev.elapsed()
         );
 
-        drop(actor_ref);
-        actor.join();
+        let res = actor
+            .get_command_actor_ref()
+            .call_blocking(ActorCommandReq::Shutdown);
+        assert!(matches!(res, ActorCommandRes::Shutdown));
     }
 
     #[test]
     fn test_actor_multiple_messages() {
-        let (actor, actor_ref) = Actor::new(1, Ping);
+        let actor = Actor::new(1, Ping);
+        let actor_ref = actor.get_user_actor_ref();
 
         let actor_ref1 = actor_ref.clone();
         let actor_ref2 = actor_ref.clone();
@@ -184,9 +232,9 @@ mod tests {
         let _pong1 = actor_ref1.call_blocking(());
         let _pong2 = actor_ref2.call_blocking(());
 
-        drop(actor_ref);
-        drop(actor_ref1);
-        drop(actor_ref2);
-        actor.join();
+        let res = actor
+            .get_command_actor_ref()
+            .call_blocking(ActorCommandReq::Shutdown);
+        assert!(matches!(res, ActorCommandRes::Shutdown));
     }
 }
