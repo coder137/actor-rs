@@ -150,12 +150,6 @@ where
     pub fn get_command_actor_ref(&self) -> ActorRef<ActorCommandReq, ActorCommandRes> {
         self.command_actor_ref.clone()
     }
-
-    pub fn join(self) {
-        self.handle.join().unwrap();
-    }
-
-    // TODO, Actor shutdown
 }
 
 #[cfg(test)]
