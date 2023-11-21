@@ -11,6 +11,12 @@ enum ActorRefState<Res> {
     RequestSent(Receiver<Res>),
 }
 
+impl<Res> Clone for ActorRefState<Res> {
+    fn clone(&self) -> Self {
+        Self::Start
+    }
+}
+
 #[derive(Debug)]
 pub enum ActorRefPoll<Data> {
     RequestSent,
@@ -32,12 +38,6 @@ impl std::fmt::Display for ActorError {
 }
 
 impl std::error::Error for ActorError {}
-
-impl<Res> Clone for ActorRefState<Res> {
-    fn clone(&self) -> Self {
-        Self::Start
-    }
-}
 
 pub struct ActorRef<Req, Res> {
     tx: Sender<(Req, Sender<Res>)>,
