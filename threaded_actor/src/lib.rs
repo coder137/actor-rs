@@ -311,6 +311,22 @@ mod tests {
     }
 
     #[test]
+    fn test_actor_send_after_shutdown() {
+        let actor = Actor::new(1, Ping { delay: None });
+        let mut actor_ref = actor.get_user_actor_ref();
+
+        let res = actor
+            .get_command_actor_ref()
+            .call_blocking(ActorCommandReq::Shutdown);
+        assert!(matches!(res, ActorCommandRes::Shutdown));
+        assert!(actor.handle.join().unwrap().is_ok());
+
+        let result = actor_ref.call_poll(|| ());
+        assert!(result.is_err());
+        assert!(matches!(result.err().unwrap(), ActorError::ActorShutdown));
+    }
+
+    #[test]
     fn test_actor_bad_drop() {
         let actor = Actor::new(1, Ping { delay: None });
         drop(actor);
