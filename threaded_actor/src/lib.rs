@@ -11,6 +11,28 @@ enum ActorRefState<Res> {
     RequestSent(Receiver<Res>),
 }
 
+#[derive(Debug)]
+pub enum ActorRefPoll<Data> {
+    RequestSent,
+    RequestQueueFull,
+    ResponseQueueEmpty,
+    Complete(Data),
+}
+
+#[derive(Debug)]
+pub enum ActorError {
+    ActorShutdown,
+    ActorInternalError,
+}
+
+impl std::fmt::Display for ActorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        format!("{:?}", self).fmt(f)
+    }
+}
+
+impl std::error::Error for ActorError {}
+
 impl<Res> Clone for ActorRefState<Res> {
     fn clone(&self) -> Self {
         Self::Start
@@ -52,28 +74,28 @@ impl<Req, Res> ActorRef<Req, Res> {
 
     /// Periodic polling for actions to be performed
     /// Should be polled as frequently as possible
-    pub fn call_poll(&mut self, on_req: impl Fn() -> Req) -> Result<Option<Res>, String> {
+    pub fn call_poll(&mut self, on_req: impl Fn() -> Req) -> Result<ActorRefPoll<Res>, ActorError> {
         match &self.state {
             ActorRefState::Start => {
                 let (tx, rx) = channel::bounded(1);
-                // !FIXME, on_req should only be called when value can be sent
+                // TODO, on_req should only be called when value can be sent
                 let req = on_req();
                 match self.tx.try_send((req, tx)) {
                     Ok(_) => {
                         self.state = ActorRefState::RequestSent(rx);
-                        Ok(None)
+                        Ok(ActorRefPoll::RequestSent)
                     }
-                    Err(TrySendError::Full(_)) => Ok(None),
-                    Err(TrySendError::Disconnected(_)) => Err("Error in Actor Thread".into()),
+                    Err(TrySendError::Full(_)) => Ok(ActorRefPoll::RequestQueueFull),
+                    Err(TrySendError::Disconnected(_)) => Err(ActorError::ActorShutdown),
                 }
             }
             ActorRefState::RequestSent(rx) => match rx.try_recv() {
                 Ok(data) => {
                     self.state = ActorRefState::Start;
-                    Ok(Some(data))
+                    Ok(ActorRefPoll::Complete(data))
                 }
-                Err(TryRecvError::Empty) => Ok(None),
-                Err(TryRecvError::Disconnected) => Err("Error in Actor Thread".into()),
+                Err(TryRecvError::Empty) => Ok(ActorRefPoll::ResponseQueueEmpty),
+                Err(TryRecvError::Disconnected) => Err(ActorError::ActorInternalError),
             },
         }
     }
@@ -164,24 +186,26 @@ where
 #[cfg(test)]
 mod tests {
 
-    use std::{
-        sync::atomic::{AtomicBool, Ordering},
-        time::Instant,
-    };
+    use std::time::{Duration, Instant};
 
     use super::*;
 
-    struct Ping;
+    struct Ping {
+        delay: Option<Duration>,
+    }
 
     impl ActorHandler<(), ()> for Ping {
         fn handle(&mut self, _request: ()) -> () {
+            if let Some(d) = self.delay {
+                thread::sleep(d);
+            }
             ()
         }
     }
 
     #[test]
     fn test_ping() {
-        let actor = Actor::new(2, Ping);
+        let actor = Actor::new(2, Ping { delay: None });
         let actor_ref = actor.get_user_actor_ref();
         let prev = Instant::now();
         let _ = actor_ref.call_blocking(());
@@ -204,18 +228,13 @@ mod tests {
 
     #[test]
     fn test_ping_poll() {
-        let actor = Actor::new(2, Ping);
+        let actor = Actor::new(2, Ping { delay: None });
         let mut actor_ref = actor.get_user_actor_ref();
         let prev = Instant::now();
         loop {
             let res = actor_ref.call_poll(|| ());
-            match res {
-                Ok(data) => {
-                    if data.is_some() {
-                        break;
-                    }
-                }
-                Err(_) => todo!(),
+            if matches!(res.unwrap(), ActorRefPoll::Complete(..)) {
+                break;
             }
         }
         let current = Instant::now();
@@ -237,7 +256,7 @@ mod tests {
 
     #[test]
     fn test_actor_multiple_messages() {
-        let actor = Actor::new(1, Ping);
+        let actor = Actor::new(1, Ping { delay: None });
         let actor_ref = actor.get_user_actor_ref();
 
         let actor_ref1 = actor_ref.clone();
@@ -253,37 +272,35 @@ mod tests {
         assert!(actor.handle.join().unwrap().is_ok());
     }
 
-    #[ignore = "Update call_poll with states for each subsequent call"]
+    // #[ignore = "Update call_poll with states for each subsequent call"]
     #[test]
     fn test_actor_queue_full() {
-        let actor = Actor::new(1, Ping);
+        let actor = Actor::new(
+            1,
+            Ping {
+                delay: Some(Duration::from_secs(5)),
+            },
+        );
         let mut actor_ref1 = actor.get_user_actor_ref();
         let mut actor_ref2 = actor.get_user_actor_ref();
 
         // Sends in queue
-        let is_taken1 = AtomicBool::new(false);
         let res1 = actor_ref1.call_poll(|| {
             println!("Called A");
-            is_taken1.store(true, Ordering::SeqCst);
             ()
         });
 
-        // Queue is full
-        let is_taken2 = AtomicBool::new(false);
         let res2 = actor_ref2.call_poll(|| {
             println!("Called B");
-            is_taken2.store(true, Ordering::SeqCst);
             ()
         });
 
-        // Checks
         assert!(res1.is_ok());
-        assert!(res1.unwrap().is_none());
-        assert!(is_taken1.load(Ordering::SeqCst));
+        assert!(matches!(res1.unwrap(), ActorRefPoll::RequestSent));
 
+        // Queue is full
         assert!(res2.is_ok());
-        assert!(res2.unwrap().is_none());
-        assert_eq!(false, is_taken2.load(Ordering::SeqCst));
+        assert!(matches!(res2.unwrap(), ActorRefPoll::RequestQueueFull));
 
         // Shutdown
         let res = actor
@@ -295,13 +312,13 @@ mod tests {
 
     #[test]
     fn test_actor_bad_drop() {
-        let actor = Actor::new(1, Ping);
+        let actor = Actor::new(1, Ping { delay: None });
         drop(actor);
     }
 
     #[test]
     fn test_actor_bad_user_actor_drop() {
-        let actor = Actor::new(1, Ping);
+        let actor = Actor::new(1, Ping { delay: None });
         let Actor {
             handle,
             user_actor_ref,
@@ -314,7 +331,7 @@ mod tests {
 
     #[test]
     fn test_actor_bad_command_actor_drop() {
-        let actor = Actor::new(1, Ping);
+        let actor = Actor::new(1, Ping { delay: None });
         let Actor {
             handle,
             user_actor_ref: _,
