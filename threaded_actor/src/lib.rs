@@ -203,6 +203,18 @@ mod tests {
         }
     }
 
+    struct SimulateThreadCrash;
+
+    impl ActorHandler<(), ()> for SimulateThreadCrash {
+        fn handle(&mut self, _request: ()) -> () {
+            panic!("Simulate thread crash");
+        }
+    }
+
+    fn send_dummy_req() -> () {
+        ()
+    }
+
     #[test]
     fn test_ping() {
         let actor = Actor::new(2, Ping { delay: None });
@@ -232,7 +244,7 @@ mod tests {
         let mut actor_ref = actor.get_user_actor_ref();
         let prev = Instant::now();
         loop {
-            let res = actor_ref.call_poll(|| ());
+            let res = actor_ref.call_poll(send_dummy_req);
             if matches!(res.unwrap(), ActorRefPoll::Complete(..)) {
                 break;
             }
@@ -285,15 +297,9 @@ mod tests {
         let mut actor_ref2 = actor.get_user_actor_ref();
 
         // Sends in queue
-        let res1 = actor_ref1.call_poll(|| {
-            println!("Called A");
-            ()
-        });
+        let res1 = actor_ref1.call_poll(send_dummy_req);
 
-        let res2 = actor_ref2.call_poll(|| {
-            println!("Called B");
-            ()
-        });
+        let res2 = actor_ref2.call_poll(send_dummy_req);
 
         assert!(res1.is_ok());
         assert!(matches!(res1.unwrap(), ActorRefPoll::RequestSent));
@@ -321,9 +327,24 @@ mod tests {
         assert!(matches!(res, ActorCommandRes::Shutdown));
         assert!(actor.handle.join().unwrap().is_ok());
 
-        let result = actor_ref.call_poll(|| ());
+        let result = actor_ref.call_poll(send_dummy_req);
         assert!(result.is_err());
         assert!(matches!(result.err().unwrap(), ActorError::ActorShutdown));
+    }
+
+    #[test]
+    fn test_actor_bad_behavior() {
+        let actor = Actor::new(1, SimulateThreadCrash);
+        let mut actor_ref = actor.get_user_actor_ref();
+        loop {
+            let result = actor_ref.call_poll(send_dummy_req);
+            if let Err(e) = result {
+                assert!(matches!(e, ActorError::ActorInternalError));
+                break;
+            }
+        }
+        let result = actor.handle.join();
+        assert!(result.is_err());
     }
 
     #[test]
