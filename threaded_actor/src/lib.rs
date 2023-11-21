@@ -62,14 +62,13 @@ impl<Req, Res> ActorRef<Req, Res> {
     }
 
     /// Blocking call till response is received
-    pub fn call_blocking(&self, req: Req) -> Res {
+    pub fn call_blocking(&self, req: Req) -> Result<Res, ActorError> {
         let (tx, rx) = channel::bounded(1);
-        // TODO, Handle this unwrap gracefully
-        // * Ideally the Actor service SHOULD NOT stop before ActorRef
-        self.tx.send((req, tx)).unwrap();
-        // TODO, Handle this unwrap gracefully
-        // * Ideally the Actor service SHOULD NOT drop the tx channel
-        rx.recv().unwrap()
+        self.tx
+            .send((req, tx))
+            .map_err(|_e| ActorError::ActorShutdown)?;
+        let response = rx.recv().map_err(|_e| ActorError::ActorInternalError)?;
+        Ok(response)
     }
 
     /// Periodic polling for actions to be performed
@@ -234,7 +233,7 @@ mod tests {
         let res = actor
             .get_command_actor_ref()
             .call_blocking(ActorCommandReq::Shutdown);
-        assert!(matches!(res, ActorCommandRes::Shutdown));
+        assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
         assert!(actor.handle.join().unwrap().is_ok());
     }
 
@@ -262,7 +261,7 @@ mod tests {
         let res = actor
             .get_command_actor_ref()
             .call_blocking(ActorCommandReq::Shutdown);
-        assert!(matches!(res, ActorCommandRes::Shutdown));
+        assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
         assert!(actor.handle.join().unwrap().is_ok());
     }
 
@@ -280,7 +279,7 @@ mod tests {
         let res = actor
             .get_command_actor_ref()
             .call_blocking(ActorCommandReq::Shutdown);
-        assert!(matches!(res, ActorCommandRes::Shutdown));
+        assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
         assert!(actor.handle.join().unwrap().is_ok());
     }
 
@@ -312,19 +311,35 @@ mod tests {
         let res = actor
             .get_command_actor_ref()
             .call_blocking(ActorCommandReq::Shutdown);
-        assert!(matches!(res, ActorCommandRes::Shutdown));
+        assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
         assert!(actor.handle.join().unwrap().is_ok());
     }
 
     #[test]
-    fn test_actor_send_after_shutdown() {
+    fn test_actor_send_after_shutdown_with_blocking() {
+        let actor = Actor::new(1, Ping { delay: None });
+        let actor_ref = actor.get_user_actor_ref();
+
+        let res = actor
+            .get_command_actor_ref()
+            .call_blocking(ActorCommandReq::Shutdown);
+        assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
+        assert!(actor.handle.join().unwrap().is_ok());
+
+        let result = actor_ref.call_blocking(());
+        assert!(result.is_err());
+        assert!(matches!(result.err().unwrap(), ActorError::ActorShutdown));
+    }
+
+    #[test]
+    fn test_actor_send_after_shutdown_with_poll() {
         let actor = Actor::new(1, Ping { delay: None });
         let mut actor_ref = actor.get_user_actor_ref();
 
         let res = actor
             .get_command_actor_ref()
             .call_blocking(ActorCommandReq::Shutdown);
-        assert!(matches!(res, ActorCommandRes::Shutdown));
+        assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
         assert!(actor.handle.join().unwrap().is_ok());
 
         let result = actor_ref.call_poll(send_dummy_req);
@@ -333,7 +348,19 @@ mod tests {
     }
 
     #[test]
-    fn test_actor_bad_behavior() {
+    fn test_actor_bad_behavior_with_blocking() {
+        let actor = Actor::new(1, SimulateThreadCrash);
+        let actor_ref = actor.get_user_actor_ref();
+        let res = actor_ref.call_blocking(());
+        assert!(res.is_err());
+        assert!(matches!(res.err().unwrap(), ActorError::ActorInternalError));
+
+        let result = actor.handle.join();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_actor_bad_behavior_with_poll() {
         let actor = Actor::new(1, SimulateThreadCrash);
         let mut actor_ref = actor.get_user_actor_ref();
         loop {
