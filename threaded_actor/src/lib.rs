@@ -11,12 +11,6 @@ enum ActorRefPollState<Res> {
     RequestSent(Receiver<Res>),
 }
 
-impl<Res> Clone for ActorRefPollState<Res> {
-    fn clone(&self) -> Self {
-        Self::Start
-    }
-}
-
 #[derive(Debug)]
 pub enum ActorRefPollInfo<Data> {
     RequestSent,
@@ -41,28 +35,23 @@ impl std::error::Error for ActorError {}
 
 pub struct ActorRef<Req, Res> {
     tx: Sender<(Req, Sender<Res>)>,
-    state: ActorRefPollState<Res>,
 }
 
 impl<Req, Res> Clone for ActorRef<Req, Res> {
     fn clone(&self) -> Self {
         Self {
             tx: self.tx.clone(),
-            state: self.state.clone(),
         }
     }
 }
 
 impl<Req, Res> ActorRef<Req, Res> {
     fn new(tx: Sender<(Req, Sender<Res>)>) -> Self {
-        Self {
-            tx,
-            state: ActorRefPollState::Start,
-        }
+        Self { tx }
     }
 
     /// Blocking call till response is received
-    pub fn call_blocking(&self, req: Req) -> Result<Res, ActorError> {
+    pub fn block(&self, req: Req) -> Result<Res, ActorError> {
         let (tx, rx) = channel::bounded(1);
         self.tx
             .send((req, tx))
@@ -71,9 +60,32 @@ impl<Req, Res> ActorRef<Req, Res> {
         Ok(response)
     }
 
+    pub fn make_poll(self) -> ActorRefPoll<Req, Res> {
+        ActorRefPoll {
+            tx: self.tx,
+            state: ActorRefPollState::Start,
+        }
+    }
+}
+
+pub struct ActorRefPoll<Req, Res> {
+    tx: Sender<(Req, Sender<Res>)>,
+    state: ActorRefPollState<Res>,
+}
+
+impl<Req, Res> Clone for ActorRefPoll<Req, Res> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            state: ActorRefPollState::Start,
+        }
+    }
+}
+
+impl<Req, Res> ActorRefPoll<Req, Res> {
     /// Periodic polling for actions to be performed
     /// Should be polled as frequently as possible
-    pub fn call_poll(
+    pub fn poll_once(
         &mut self,
         on_req: impl Fn() -> Req,
     ) -> Result<ActorRefPollInfo<Res>, ActorError> {
@@ -222,7 +234,7 @@ mod tests {
         let actor = Actor::new(2, Ping { delay: None });
         let actor_ref = actor.get_user_actor_ref();
         let prev = Instant::now();
-        let _ = actor_ref.call_blocking(());
+        let _ = actor_ref.block(());
         let current = Instant::now();
 
         println!(
@@ -235,7 +247,7 @@ mod tests {
 
         let res = actor
             .get_command_actor_ref()
-            .call_blocking(ActorCommandReq::Shutdown);
+            .block(ActorCommandReq::Shutdown);
         assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
         assert!(actor.handle.join().unwrap().is_ok());
     }
@@ -243,10 +255,10 @@ mod tests {
     #[test]
     fn test_ping_poll() {
         let actor = Actor::new(2, Ping { delay: None });
-        let mut actor_ref = actor.get_user_actor_ref();
+        let mut actor_ref = actor.get_user_actor_ref().make_poll();
         let prev = Instant::now();
         loop {
-            let res = actor_ref.call_poll(send_dummy_req);
+            let res = actor_ref.poll_once(send_dummy_req);
             if matches!(res.unwrap(), ActorRefPollInfo::Complete(..)) {
                 break;
             }
@@ -263,7 +275,7 @@ mod tests {
 
         let res = actor
             .get_command_actor_ref()
-            .call_blocking(ActorCommandReq::Shutdown);
+            .block(ActorCommandReq::Shutdown);
         assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
         assert!(actor.handle.join().unwrap().is_ok());
     }
@@ -276,17 +288,17 @@ mod tests {
         let actor_ref1 = actor_ref.clone();
         let actor_ref2 = actor_ref.clone();
 
-        let _pong1 = actor_ref1.call_blocking(());
-        let _pong2 = actor_ref2.call_blocking(());
+        let _pong1 = actor_ref1.block(());
+        let _pong2 = actor_ref2.block(());
 
         let res = actor
             .get_command_actor_ref()
-            .call_blocking(ActorCommandReq::Shutdown);
+            .block(ActorCommandReq::Shutdown);
         assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
         assert!(actor.handle.join().unwrap().is_ok());
     }
 
-    // #[ignore = "Update call_poll with states for each subsequent call"]
+    // #[ignore = "Update poll_once with states for each subsequent call"]
     #[test]
     fn test_actor_queue_full() {
         let actor = Actor::new(
@@ -295,13 +307,13 @@ mod tests {
                 delay: Some(Duration::from_secs(5)),
             },
         );
-        let mut actor_ref1 = actor.get_user_actor_ref();
-        let mut actor_ref2 = actor.get_user_actor_ref();
+        let mut actor_ref1 = actor.get_user_actor_ref().make_poll();
+        let mut actor_ref2 = actor.get_user_actor_ref().make_poll();
 
         // Sends in queue
-        let res1 = actor_ref1.call_poll(send_dummy_req);
+        let res1 = actor_ref1.poll_once(send_dummy_req);
 
-        let res2 = actor_ref2.call_poll(send_dummy_req);
+        let res2 = actor_ref2.poll_once(send_dummy_req);
 
         assert!(res1.is_ok());
         assert!(matches!(res1.unwrap(), ActorRefPollInfo::RequestSent));
@@ -313,7 +325,7 @@ mod tests {
         // Shutdown
         let res = actor
             .get_command_actor_ref()
-            .call_blocking(ActorCommandReq::Shutdown);
+            .block(ActorCommandReq::Shutdown);
         assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
         assert!(actor.handle.join().unwrap().is_ok());
     }
@@ -325,11 +337,11 @@ mod tests {
 
         let res = actor
             .get_command_actor_ref()
-            .call_blocking(ActorCommandReq::Shutdown);
+            .block(ActorCommandReq::Shutdown);
         assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
         assert!(actor.handle.join().unwrap().is_ok());
 
-        let result = actor_ref.call_blocking(());
+        let result = actor_ref.block(());
         assert!(result.is_err());
         assert!(matches!(result.err().unwrap(), ActorError::ActorShutdown));
     }
@@ -337,15 +349,15 @@ mod tests {
     #[test]
     fn test_actor_send_after_shutdown_with_poll() {
         let actor = Actor::new(1, Ping { delay: None });
-        let mut actor_ref = actor.get_user_actor_ref();
+        let mut actor_ref = actor.get_user_actor_ref().make_poll();
 
         let res = actor
             .get_command_actor_ref()
-            .call_blocking(ActorCommandReq::Shutdown);
+            .block(ActorCommandReq::Shutdown);
         assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
         assert!(actor.handle.join().unwrap().is_ok());
 
-        let result = actor_ref.call_poll(send_dummy_req);
+        let result = actor_ref.poll_once(send_dummy_req);
         assert!(result.is_err());
         assert!(matches!(result.err().unwrap(), ActorError::ActorShutdown));
     }
@@ -354,7 +366,7 @@ mod tests {
     fn test_actor_bad_behavior_with_blocking() {
         let actor = Actor::new(1, SimulateThreadCrash);
         let actor_ref = actor.get_user_actor_ref();
-        let res = actor_ref.call_blocking(());
+        let res = actor_ref.block(());
         assert!(res.is_err());
         assert!(matches!(res.err().unwrap(), ActorError::ActorInternalError));
 
@@ -365,9 +377,9 @@ mod tests {
     #[test]
     fn test_actor_bad_behavior_with_poll() {
         let actor = Actor::new(1, SimulateThreadCrash);
-        let mut actor_ref = actor.get_user_actor_ref();
+        let mut actor_ref = actor.get_user_actor_ref().make_poll();
         loop {
-            let result = actor_ref.call_poll(send_dummy_req);
+            let result = actor_ref.poll_once(send_dummy_req);
             if let Err(e) = result {
                 assert!(matches!(e, ActorError::ActorInternalError));
                 break;
