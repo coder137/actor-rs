@@ -6,13 +6,15 @@ pub trait ActorHandler<Req, Res> {
     fn handle(&mut self, request: Req) -> Res;
 }
 
-enum ActorRefPollState<Res> {
+enum ActorRefPollState<Req, Res> {
     Start,
+    Loaded(Req, (Sender<Res>, Receiver<Res>)),
     RequestSent(Receiver<Res>),
 }
 
 #[derive(Debug)]
 pub enum ActorRefPollInfo<Data> {
+    DataLoaded,
     RequestSent,
     RequestQueueFull,
     ResponseQueueEmpty,
@@ -61,56 +63,77 @@ impl<Req, Res> ActorRef<Req, Res> {
     }
 
     pub fn make_poll(self) -> ActorRefPoll<Req, Res> {
-        ActorRefPoll {
-            tx: self.tx,
-            state: ActorRefPollState::Start,
-        }
+        ActorRefPoll::new(self.tx)
     }
 }
 
 pub struct ActorRefPoll<Req, Res> {
     tx: Sender<(Req, Sender<Res>)>,
-    state: ActorRefPollState<Res>,
+    state: Option<ActorRefPollState<Req, Res>>,
 }
 
 impl<Req, Res> Clone for ActorRefPoll<Req, Res> {
     fn clone(&self) -> Self {
-        Self {
-            tx: self.tx.clone(),
-            state: ActorRefPollState::Start,
-        }
+        ActorRefPoll::new(self.tx.clone())
     }
 }
 
 impl<Req, Res> ActorRefPoll<Req, Res> {
+    pub fn new(tx: Sender<(Req, Sender<Res>)>) -> Self {
+        Self {
+            tx,
+            state: Some(ActorRefPollState::Start),
+        }
+    }
+
     /// Periodic polling for actions to be performed
     /// Should be polled as frequently as possible
     pub fn poll_once(
         &mut self,
         on_req: impl Fn() -> Req,
     ) -> Result<ActorRefPollInfo<Res>, ActorError> {
-        match &self.state {
+        let state = self.state.take().unwrap();
+        match state {
             ActorRefPollState::Start => {
                 let (tx, rx) = channel::bounded(1);
-                // TODO, on_req should only be called when value can be sent
                 let req = on_req();
+                self.state = Some(ActorRefPollState::Loaded(req, (tx, rx)));
+                Ok(ActorRefPollInfo::DataLoaded)
+            }
+            ActorRefPollState::Loaded(req, (tx, rx)) => {
+                //
                 match self.tx.try_send((req, tx)) {
                     Ok(_) => {
-                        self.state = ActorRefPollState::RequestSent(rx);
+                        self.state = Some(ActorRefPollState::RequestSent(rx));
                         Ok(ActorRefPollInfo::RequestSent)
                     }
-                    Err(TrySendError::Full(_)) => Ok(ActorRefPollInfo::RequestQueueFull),
-                    Err(TrySendError::Disconnected(_)) => Err(ActorError::ActorShutdown),
+                    Err(TrySendError::Full((r, t))) => {
+                        self.state = Some(ActorRefPollState::Loaded(r, (t, rx)));
+                        Ok(ActorRefPollInfo::RequestQueueFull)
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        self.state = Some(ActorRefPollState::Start);
+                        Err(ActorError::ActorShutdown)
+                    }
                 }
             }
-            ActorRefPollState::RequestSent(rx) => match rx.try_recv() {
-                Ok(data) => {
-                    self.state = ActorRefPollState::Start;
-                    Ok(ActorRefPollInfo::Complete(data))
+            ActorRefPollState::RequestSent(rx) => {
+                //
+                match rx.try_recv() {
+                    Ok(data) => {
+                        self.state = Some(ActorRefPollState::Start);
+                        Ok(ActorRefPollInfo::Complete(data))
+                    }
+                    Err(TryRecvError::Empty) => {
+                        self.state = Some(ActorRefPollState::RequestSent(rx));
+                        Ok(ActorRefPollInfo::ResponseQueueEmpty)
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        self.state = Some(ActorRefPollState::Start);
+                        Err(ActorError::ActorInternalError)
+                    }
                 }
-                Err(TryRecvError::Empty) => Ok(ActorRefPollInfo::ResponseQueueEmpty),
-                Err(TryRecvError::Disconnected) => Err(ActorError::ActorInternalError),
-            },
+            }
         }
     }
 }
@@ -312,13 +335,19 @@ mod tests {
 
         // Sends in queue
         let res1 = actor_ref1.poll_once(send_dummy_req);
+        assert!(res1.is_ok());
+        assert!(matches!(res1.unwrap(), ActorRefPollInfo::DataLoaded));
 
-        let res2 = actor_ref2.poll_once(send_dummy_req);
-
+        let res1 = actor_ref1.poll_once(send_dummy_req);
         assert!(res1.is_ok());
         assert!(matches!(res1.unwrap(), ActorRefPollInfo::RequestSent));
 
+        let res2 = actor_ref2.poll_once(send_dummy_req);
+        assert!(res2.is_ok());
+        assert!(matches!(res2.unwrap(), ActorRefPollInfo::DataLoaded));
+
         // Queue is full
+        let res2 = actor_ref2.poll_once(send_dummy_req);
         assert!(res2.is_ok());
         assert!(matches!(res2.unwrap(), ActorRefPollInfo::RequestQueueFull));
 
@@ -356,6 +385,10 @@ mod tests {
             .block(ActorCommandReq::Shutdown);
         assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
         assert!(actor.handle.join().unwrap().is_ok());
+
+        let result = actor_ref.poll_once(send_dummy_req);
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), ActorRefPollInfo::DataLoaded));
 
         let result = actor_ref.poll_once(send_dummy_req);
         assert!(result.is_err());
