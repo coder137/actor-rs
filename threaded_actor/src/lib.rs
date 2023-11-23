@@ -6,19 +6,19 @@ pub trait ActorHandler<Req, Res> {
     fn handle(&mut self, request: Req) -> Res;
 }
 
-enum ActorRefState<Res> {
+enum ActorRefPollState<Res> {
     Start,
     RequestSent(Receiver<Res>),
 }
 
-impl<Res> Clone for ActorRefState<Res> {
+impl<Res> Clone for ActorRefPollState<Res> {
     fn clone(&self) -> Self {
         Self::Start
     }
 }
 
 #[derive(Debug)]
-pub enum ActorRefPoll<Data> {
+pub enum ActorRefPollInfo<Data> {
     RequestSent,
     RequestQueueFull,
     ResponseQueueEmpty,
@@ -41,7 +41,7 @@ impl std::error::Error for ActorError {}
 
 pub struct ActorRef<Req, Res> {
     tx: Sender<(Req, Sender<Res>)>,
-    state: ActorRefState<Res>,
+    state: ActorRefPollState<Res>,
 }
 
 impl<Req, Res> Clone for ActorRef<Req, Res> {
@@ -57,7 +57,7 @@ impl<Req, Res> ActorRef<Req, Res> {
     fn new(tx: Sender<(Req, Sender<Res>)>) -> Self {
         Self {
             tx,
-            state: ActorRefState::Start,
+            state: ActorRefPollState::Start,
         }
     }
 
@@ -73,27 +73,30 @@ impl<Req, Res> ActorRef<Req, Res> {
 
     /// Periodic polling for actions to be performed
     /// Should be polled as frequently as possible
-    pub fn call_poll(&mut self, on_req: impl Fn() -> Req) -> Result<ActorRefPoll<Res>, ActorError> {
+    pub fn call_poll(
+        &mut self,
+        on_req: impl Fn() -> Req,
+    ) -> Result<ActorRefPollInfo<Res>, ActorError> {
         match &self.state {
-            ActorRefState::Start => {
+            ActorRefPollState::Start => {
                 let (tx, rx) = channel::bounded(1);
                 // TODO, on_req should only be called when value can be sent
                 let req = on_req();
                 match self.tx.try_send((req, tx)) {
                     Ok(_) => {
-                        self.state = ActorRefState::RequestSent(rx);
-                        Ok(ActorRefPoll::RequestSent)
+                        self.state = ActorRefPollState::RequestSent(rx);
+                        Ok(ActorRefPollInfo::RequestSent)
                     }
-                    Err(TrySendError::Full(_)) => Ok(ActorRefPoll::RequestQueueFull),
+                    Err(TrySendError::Full(_)) => Ok(ActorRefPollInfo::RequestQueueFull),
                     Err(TrySendError::Disconnected(_)) => Err(ActorError::ActorShutdown),
                 }
             }
-            ActorRefState::RequestSent(rx) => match rx.try_recv() {
+            ActorRefPollState::RequestSent(rx) => match rx.try_recv() {
                 Ok(data) => {
-                    self.state = ActorRefState::Start;
-                    Ok(ActorRefPoll::Complete(data))
+                    self.state = ActorRefPollState::Start;
+                    Ok(ActorRefPollInfo::Complete(data))
                 }
-                Err(TryRecvError::Empty) => Ok(ActorRefPoll::ResponseQueueEmpty),
+                Err(TryRecvError::Empty) => Ok(ActorRefPollInfo::ResponseQueueEmpty),
                 Err(TryRecvError::Disconnected) => Err(ActorError::ActorInternalError),
             },
         }
@@ -244,7 +247,7 @@ mod tests {
         let prev = Instant::now();
         loop {
             let res = actor_ref.call_poll(send_dummy_req);
-            if matches!(res.unwrap(), ActorRefPoll::Complete(..)) {
+            if matches!(res.unwrap(), ActorRefPollInfo::Complete(..)) {
                 break;
             }
         }
@@ -301,11 +304,11 @@ mod tests {
         let res2 = actor_ref2.call_poll(send_dummy_req);
 
         assert!(res1.is_ok());
-        assert!(matches!(res1.unwrap(), ActorRefPoll::RequestSent));
+        assert!(matches!(res1.unwrap(), ActorRefPollInfo::RequestSent));
 
         // Queue is full
         assert!(res2.is_ok());
-        assert!(matches!(res2.unwrap(), ActorRefPoll::RequestQueueFull));
+        assert!(matches!(res2.unwrap(), ActorRefPollInfo::RequestQueueFull));
 
         // Shutdown
         let res = actor
