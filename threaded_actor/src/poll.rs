@@ -35,20 +35,16 @@ impl<Req, Res> ActorRefPollPromise<Req, Res> {
         }
     }
 
-    pub fn is_ready() -> bool {
-        todo!()
+    pub fn get(&self) -> Option<&Res> {
+        self.res.as_ref().map(|d| d)
     }
 
-    pub fn get(&self) -> Option<&Req> {
-        todo!()
+    pub fn get_mut(&mut self) -> Option<&mut Res> {
+        self.res.as_mut().map(|d| d)
     }
 
-    pub fn get_mut(&mut self) -> Option<&mut Req> {
-        todo!()
-    }
-
-    pub fn take(self) -> Option<Req> {
-        todo!()
+    pub fn take(self) -> Option<Res> {
+        self.res
     }
 
     /// Periodic polling for actions to be performed
@@ -118,23 +114,19 @@ mod tests {
         let actor = Actor::new(2, Ping { delay: None });
         let actor_ref = actor.get_user_actor_ref();
 
-        let prev: Instant = Instant::now();
+        let now: Instant = Instant::now();
         let mut promise = actor_ref.as_poll(());
+        assert!(promise.get().is_none());
         loop {
             let res = promise.poll_once();
             if matches!(res.unwrap(), ActorRefPollInfo::Complete) {
                 break;
             }
         }
-        let current = Instant::now();
-
-        println!(
-            "Current: {:?} Prev: {:?} Diff: {:?}, Elapsed: {:?}",
-            current,
-            prev,
-            current.duration_since(prev),
-            prev.elapsed()
-        );
+        println!("Elapsed: {:?}", now.elapsed());
+        assert!(promise.get().is_some());
+        assert!(promise.get_mut().is_some());
+        assert!(promise.take().is_some());
 
         let res = actor
             .get_command_actor_ref()
@@ -165,6 +157,31 @@ mod tests {
         let res2 = promise2.poll_once();
         assert!(res2.is_ok());
         assert!(matches!(res2.unwrap(), ActorRefPollInfo::RequestQueueFull));
+
+        // Shutdown
+        let res = actor
+            .get_command_actor_ref()
+            .block(ActorCommandReq::Shutdown);
+        assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
+        assert!(actor.handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn test_actor_poll_after_complete() {
+        let actor = Actor::new(1, Ping { delay: None });
+        let actor_ref = actor.get_user_actor_ref();
+
+        let mut promise = actor_ref.as_poll(());
+        loop {
+            let res = promise.poll_once();
+            if matches!(res.unwrap(), ActorRefPollInfo::Complete) {
+                break;
+            }
+        }
+        let res = promise.poll_once();
+        assert!(res.is_ok());
+        assert!(matches!(res.unwrap(), ActorRefPollInfo::Complete));
+        assert!(matches!(promise.state, ActorRefPollState::End(..)));
 
         // Shutdown
         let res = actor
