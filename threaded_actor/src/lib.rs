@@ -123,28 +123,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common_test_actors::{Ping, SimulateThreadCrash};
     use std::time::{Duration, Instant};
-
-    struct Ping {
-        delay: Option<Duration>,
-    }
-
-    impl ActorHandler<(), ()> for Ping {
-        fn handle(&mut self, _request: ()) -> () {
-            if let Some(d) = self.delay {
-                thread::sleep(d);
-            }
-            ()
-        }
-    }
-
-    struct SimulateThreadCrash;
-
-    impl ActorHandler<(), ()> for SimulateThreadCrash {
-        fn handle(&mut self, _request: ()) -> () {
-            panic!("Simulate thread crash");
-        }
-    }
 
     #[test]
     fn test_ping() {
