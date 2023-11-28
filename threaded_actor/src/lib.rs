@@ -1,39 +1,12 @@
 use std::thread::{self, JoinHandle};
 
-use crossbeam::channel::{self, Receiver, Select, Sender, TryRecvError, TrySendError};
+use crossbeam::channel::{self, Select, Sender};
 
-pub trait ActorHandler<Req, Res> {
-    fn handle(&mut self, request: Req) -> Res;
-}
+mod common;
+pub use common::*;
 
-enum ActorRefPollState<Req, Res> {
-    Start,
-    Loaded(Req, (Sender<Res>, Receiver<Res>)),
-    RequestSent(Receiver<Res>),
-}
-
-#[derive(Debug)]
-pub enum ActorRefPollInfo<Data> {
-    DataLoaded,
-    RequestSent,
-    RequestQueueFull,
-    ResponseQueueEmpty,
-    Complete(Data),
-}
-
-#[derive(Debug)]
-pub enum ActorError {
-    ActorShutdown,
-    ActorInternalError,
-}
-
-impl std::fmt::Display for ActorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        format!("{:?}", self).fmt(f)
-    }
-}
-
-impl std::error::Error for ActorError {}
+mod poll;
+pub use poll::*;
 
 pub struct ActorRef<Req, Res> {
     tx: Sender<(Req, Sender<Res>)>,
@@ -41,9 +14,7 @@ pub struct ActorRef<Req, Res> {
 
 impl<Req, Res> Clone for ActorRef<Req, Res> {
     fn clone(&self) -> Self {
-        Self {
-            tx: self.tx.clone(),
-        }
+        Self::new(self.tx.clone())
     }
 }
 
@@ -62,79 +33,8 @@ impl<Req, Res> ActorRef<Req, Res> {
         Ok(response)
     }
 
-    pub fn make_poll(self) -> ActorRefPoll<Req, Res> {
-        ActorRefPoll::new(self.tx)
-    }
-}
-
-pub struct ActorRefPoll<Req, Res> {
-    tx: Sender<(Req, Sender<Res>)>,
-    state: Option<ActorRefPollState<Req, Res>>,
-}
-
-impl<Req, Res> Clone for ActorRefPoll<Req, Res> {
-    fn clone(&self) -> Self {
-        ActorRefPoll::new(self.tx.clone())
-    }
-}
-
-impl<Req, Res> ActorRefPoll<Req, Res> {
-    pub fn new(tx: Sender<(Req, Sender<Res>)>) -> Self {
-        Self {
-            tx,
-            state: Some(ActorRefPollState::Start),
-        }
-    }
-
-    /// Periodic polling for actions to be performed
-    /// Should be polled as frequently as possible
-    pub fn poll_once(
-        &mut self,
-        on_req: impl Fn() -> Req,
-    ) -> Result<ActorRefPollInfo<Res>, ActorError> {
-        let state = self.state.take().unwrap();
-        match state {
-            ActorRefPollState::Start => {
-                let (tx, rx) = channel::bounded(1);
-                let req = on_req();
-                self.state = Some(ActorRefPollState::Loaded(req, (tx, rx)));
-                Ok(ActorRefPollInfo::DataLoaded)
-            }
-            ActorRefPollState::Loaded(req, (tx, rx)) => {
-                //
-                match self.tx.try_send((req, tx)) {
-                    Ok(_) => {
-                        self.state = Some(ActorRefPollState::RequestSent(rx));
-                        Ok(ActorRefPollInfo::RequestSent)
-                    }
-                    Err(TrySendError::Full((r, t))) => {
-                        self.state = Some(ActorRefPollState::Loaded(r, (t, rx)));
-                        Ok(ActorRefPollInfo::RequestQueueFull)
-                    }
-                    Err(TrySendError::Disconnected(_)) => {
-                        self.state = Some(ActorRefPollState::Start);
-                        Err(ActorError::ActorShutdown)
-                    }
-                }
-            }
-            ActorRefPollState::RequestSent(rx) => {
-                //
-                match rx.try_recv() {
-                    Ok(data) => {
-                        self.state = Some(ActorRefPollState::Start);
-                        Ok(ActorRefPollInfo::Complete(data))
-                    }
-                    Err(TryRecvError::Empty) => {
-                        self.state = Some(ActorRefPollState::RequestSent(rx));
-                        Ok(ActorRefPollInfo::ResponseQueueEmpty)
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        self.state = Some(ActorRefPollState::Start);
-                        Err(ActorError::ActorInternalError)
-                    }
-                }
-            }
-        }
+    pub fn as_poll(&self, req: Req) -> ActorRefPollPromise<Req, Res> {
+        ActorRefPollPromise::new(req, self.tx.clone())
     }
 }
 
@@ -222,79 +122,18 @@ where
 
 #[cfg(test)]
 mod tests {
-
-    use std::time::{Duration, Instant};
-
     use super::*;
-
-    struct Ping {
-        delay: Option<Duration>,
-    }
-
-    impl ActorHandler<(), ()> for Ping {
-        fn handle(&mut self, _request: ()) -> () {
-            if let Some(d) = self.delay {
-                thread::sleep(d);
-            }
-            ()
-        }
-    }
-
-    struct SimulateThreadCrash;
-
-    impl ActorHandler<(), ()> for SimulateThreadCrash {
-        fn handle(&mut self, _request: ()) -> () {
-            panic!("Simulate thread crash");
-        }
-    }
-
-    fn send_dummy_req() -> () {
-        ()
-    }
+    use crate::common_test_actors::{Ping, SimulateThreadCrash};
+    use std::time::Instant;
 
     #[test]
     fn test_ping() {
         let actor = Actor::new(2, Ping { delay: None });
         let actor_ref = actor.get_user_actor_ref();
-        let prev = Instant::now();
+
+        let now = Instant::now();
         let _ = actor_ref.block(());
-        let current = Instant::now();
-
-        println!(
-            "Current: {:?} Prev: {:?} Diff: {:?}, Elapsed: {:?}",
-            current,
-            prev,
-            current.duration_since(prev),
-            prev.elapsed()
-        );
-
-        let res = actor
-            .get_command_actor_ref()
-            .block(ActorCommandReq::Shutdown);
-        assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
-        assert!(actor.handle.join().unwrap().is_ok());
-    }
-
-    #[test]
-    fn test_ping_poll() {
-        let actor = Actor::new(2, Ping { delay: None });
-        let mut actor_ref = actor.get_user_actor_ref().make_poll();
-        let prev = Instant::now();
-        loop {
-            let res = actor_ref.poll_once(send_dummy_req);
-            if matches!(res.unwrap(), ActorRefPollInfo::Complete(..)) {
-                break;
-            }
-        }
-        let current = Instant::now();
-
-        println!(
-            "Current: {:?} Prev: {:?} Diff: {:?}, Elapsed: {:?}",
-            current,
-            prev,
-            current.duration_since(prev),
-            prev.elapsed()
-        );
+        println!("Elapsed: {:?}", now.elapsed());
 
         let res = actor
             .get_command_actor_ref()
@@ -321,44 +160,6 @@ mod tests {
         assert!(actor.handle.join().unwrap().is_ok());
     }
 
-    // #[ignore = "Update poll_once with states for each subsequent call"]
-    #[test]
-    fn test_actor_queue_full() {
-        let actor = Actor::new(
-            1,
-            Ping {
-                delay: Some(Duration::from_secs(5)),
-            },
-        );
-        let mut actor_ref1 = actor.get_user_actor_ref().make_poll();
-        let mut actor_ref2 = actor.get_user_actor_ref().make_poll();
-
-        // Sends in queue
-        let res1 = actor_ref1.poll_once(send_dummy_req);
-        assert!(res1.is_ok());
-        assert!(matches!(res1.unwrap(), ActorRefPollInfo::DataLoaded));
-
-        let res1 = actor_ref1.poll_once(send_dummy_req);
-        assert!(res1.is_ok());
-        assert!(matches!(res1.unwrap(), ActorRefPollInfo::RequestSent));
-
-        let res2 = actor_ref2.poll_once(send_dummy_req);
-        assert!(res2.is_ok());
-        assert!(matches!(res2.unwrap(), ActorRefPollInfo::DataLoaded));
-
-        // Queue is full
-        let res2 = actor_ref2.poll_once(send_dummy_req);
-        assert!(res2.is_ok());
-        assert!(matches!(res2.unwrap(), ActorRefPollInfo::RequestQueueFull));
-
-        // Shutdown
-        let res = actor
-            .get_command_actor_ref()
-            .block(ActorCommandReq::Shutdown);
-        assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
-        assert!(actor.handle.join().unwrap().is_ok());
-    }
-
     #[test]
     fn test_actor_send_after_shutdown_with_blocking() {
         let actor = Actor::new(1, Ping { delay: None });
@@ -376,26 +177,6 @@ mod tests {
     }
 
     #[test]
-    fn test_actor_send_after_shutdown_with_poll() {
-        let actor = Actor::new(1, Ping { delay: None });
-        let mut actor_ref = actor.get_user_actor_ref().make_poll();
-
-        let res = actor
-            .get_command_actor_ref()
-            .block(ActorCommandReq::Shutdown);
-        assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
-        assert!(actor.handle.join().unwrap().is_ok());
-
-        let result = actor_ref.poll_once(send_dummy_req);
-        assert!(result.is_ok());
-        assert!(matches!(result.unwrap(), ActorRefPollInfo::DataLoaded));
-
-        let result = actor_ref.poll_once(send_dummy_req);
-        assert!(result.is_err());
-        assert!(matches!(result.err().unwrap(), ActorError::ActorShutdown));
-    }
-
-    #[test]
     fn test_actor_bad_behavior_with_blocking() {
         let actor = Actor::new(1, SimulateThreadCrash);
         let actor_ref = actor.get_user_actor_ref();
@@ -403,21 +184,6 @@ mod tests {
         assert!(res.is_err());
         assert!(matches!(res.err().unwrap(), ActorError::ActorInternalError));
 
-        let result = actor.handle.join();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_actor_bad_behavior_with_poll() {
-        let actor = Actor::new(1, SimulateThreadCrash);
-        let mut actor_ref = actor.get_user_actor_ref().make_poll();
-        loop {
-            let result = actor_ref.poll_once(send_dummy_req);
-            if let Err(e) = result {
-                assert!(matches!(e, ActorError::ActorInternalError));
-                break;
-            }
-        }
         let result = actor.handle.join();
         assert!(result.is_err());
     }
