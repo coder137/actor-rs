@@ -124,24 +124,16 @@ where
 mod tests {
     use super::*;
     use crate::common_test_actors::{Ping, SimulateThreadCrash};
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     #[test]
     fn test_ping() {
         let actor = Actor::new(2, Ping { delay: None });
         let actor_ref = actor.get_user_actor_ref();
 
-        let prev = Instant::now();
+        let now = Instant::now();
         let _ = actor_ref.block(());
-        let current = Instant::now();
-
-        println!(
-            "Current: {:?} Prev: {:?} Diff: {:?}, Elapsed: {:?}",
-            current,
-            prev,
-            current.duration_since(prev),
-            prev.elapsed()
-        );
+        println!("Elapsed: {:?}", now.elapsed());
 
         let res = actor
             .get_command_actor_ref()
