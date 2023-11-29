@@ -147,7 +147,7 @@ mod tests {
         let actor_ref = actor_pool.new_actor(
             1,
             Ping {
-                delay: Some(Duration::from_secs(5)),
+                delay: Some(Duration::from_secs(1)),
             },
         );
         let actor_ref1 = actor_ref.clone();

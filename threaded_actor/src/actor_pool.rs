@@ -49,7 +49,7 @@ impl ActorPool {
 struct Actor;
 
 impl Actor {
-    pub fn create<Req, Res>(
+    fn create<Req, Res>(
         bound: usize,
         mut handler: impl ActorHandler<Req, Res> + Send + 'static,
         shutdown_ind: Arc<AtomicBool>,
