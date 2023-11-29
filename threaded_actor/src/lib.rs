@@ -1,6 +1,12 @@
-use std::thread::{self, JoinHandle};
-
-use crossbeam::channel::{self, Select, Sender};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
+        Arc,
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
 
 mod common;
 pub use common::*;
@@ -8,8 +14,52 @@ pub use common::*;
 mod poll;
 pub use poll::*;
 
+pub struct ActorPool {
+    actors: Vec<JoinHandle<()>>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl ActorPool {
+    pub fn new() -> Self {
+        Self {
+            actors: Vec::new(),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn new_actor<Req, Res>(
+        &mut self,
+        bound: usize,
+        handler: impl ActorHandler<Req, Res> + Send + 'static,
+    ) -> ActorRef<Req, Res>
+    where
+        Req: Send + 'static,
+        Res: Send + 'static,
+    {
+        let (handle, actor_ref) = Actor::create(bound, handler, self.shutdown.clone());
+        self.actors.push(handle);
+        actor_ref
+    }
+
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_shutdown(&self) -> bool {
+        self.actors.iter().filter(|h| !h.is_finished()).count() == 0
+    }
+}
+
+type ActorSender<T> = SyncSender<T>;
+type ActorReceiver<T> = Receiver<T>;
+type ActorMessage<Req, Res> = (Req, ActorSender<Res>);
+
+fn create_channel<T>(bound: usize) -> (ActorSender<T>, ActorReceiver<T>) {
+    mpsc::sync_channel(bound)
+}
+
 pub struct ActorRef<Req, Res> {
-    tx: Sender<(Req, Sender<Res>)>,
+    tx: ActorSender<ActorMessage<Req, Res>>,
 }
 
 impl<Req, Res> Clone for ActorRef<Req, Res> {
@@ -19,13 +69,13 @@ impl<Req, Res> Clone for ActorRef<Req, Res> {
 }
 
 impl<Req, Res> ActorRef<Req, Res> {
-    fn new(tx: Sender<(Req, Sender<Res>)>) -> Self {
+    fn new(tx: ActorSender<ActorMessage<Req, Res>>) -> Self {
         Self { tx }
     }
 
     /// Blocking call till response is received
     pub fn block(&self, req: Req) -> Result<Res, ActorError> {
-        let (tx, rx) = channel::bounded(1);
+        let (tx, rx) = create_channel(1);
         self.tx
             .send((req, tx))
             .map_err(|_e| ActorError::ActorShutdown)?;
@@ -46,77 +96,41 @@ pub enum ActorCommandRes {
     Shutdown,
 }
 
-pub struct Actor<Req, Res> {
-    handle: JoinHandle<Result<(), ()>>,
-    user_actor_ref: ActorRef<Req, Res>,
-    command_actor_ref: ActorRef<ActorCommandReq, ActorCommandRes>,
-}
+pub struct Actor {}
 
-impl<Req, Res> Actor<Req, Res>
-where
-    Req: Send + 'static,
-    Res: Send + 'static,
-{
-    pub fn new(bound: usize, mut handler: impl ActorHandler<Req, Res> + Send + 'static) -> Self {
-        let (user_tx, user_rx) = channel::bounded::<(Req, Sender<Res>)>(bound);
-
-        let (command_tx, command_rx) =
-            channel::bounded::<(ActorCommandReq, Sender<ActorCommandRes>)>(1);
-
+impl Actor {
+    pub fn create<Req, Res>(
+        bound: usize,
+        mut handler: impl ActorHandler<Req, Res> + Send + 'static,
+        shutdown_ind: Arc<AtomicBool>,
+    ) -> (JoinHandle<()>, ActorRef<Req, Res>)
+    where
+        Req: Send + 'static,
+        Res: Send + 'static,
+    {
+        let (user_tx, user_rx) = create_channel::<(Req, ActorSender<Res>)>(bound);
         let handle = thread::spawn(move || {
-            let mut shutdown = false;
-            let mut exit_result = Ok(()); // TODO, Specialize the error return type latyer
-            let mut sel = Select::new();
-            // TODO, Use indexes later instead of match
-            let _user_rx_index = sel.recv(&user_rx);
-            let _command_rx_index = sel.recv(&command_rx);
+            //
+            println!("Current {:?}", thread::current().id());
             loop {
-                match sel.ready() {
-                    0 => {
-                        if let Ok((user_request, tx)) = user_rx.recv() {
-                            let response = handler.handle(user_request);
-                            let _ = tx.send(response);
-                        } else {
-                            shutdown = true;
-                            exit_result = Err(());
+                // * The recv channel times out to check if this actor needs to shutdown
+                match user_rx.recv_timeout(Duration::from_secs(1)) {
+                    Ok((req, res_tx)) => {
+                        let res = handler.handle(req);
+                        let _ = res_tx.send(res);
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        if shutdown_ind.load(Ordering::Relaxed) {
+                            break;
                         }
                     }
-                    1 => {
-                        if let Ok((user_command, tx)) = command_rx.recv() {
-                            let response = match user_command {
-                                ActorCommandReq::Shutdown => {
-                                    shutdown = true;
-                                    ActorCommandRes::Shutdown
-                                }
-                            };
-                            let _ = tx.send(response);
-                        } else {
-                            shutdown = true;
-                            exit_result = Err(());
-                        }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        break;
                     }
-                    _ => unreachable!(),
-                };
-
-                if shutdown {
-                    break;
                 }
             }
-            exit_result
         });
-        Self {
-            handle,
-            user_actor_ref: ActorRef::new(user_tx),
-            command_actor_ref: ActorRef::new(command_tx),
-        }
-    }
-
-    pub fn get_user_actor_ref(&self) -> ActorRef<Req, Res> {
-        self.user_actor_ref.clone()
-    }
-
-    pub fn get_command_actor_ref(&self) -> ActorRef<ActorCommandReq, ActorCommandRes> {
-        self.command_actor_ref.clone()
+        (handle, ActorRef::new(user_tx))
     }
 }
 
@@ -126,26 +140,35 @@ mod tests {
     use crate::common_test_actors::{Ping, SimulateThreadCrash};
     use std::time::Instant;
 
+    fn shutdown_actor_pool(actor_pool: ActorPool) {
+        actor_pool.shutdown();
+        loop {
+            if actor_pool.is_shutdown() {
+                break;
+            }
+        }
+        assert!(actor_pool.is_shutdown());
+    }
+
     #[test]
     fn test_ping() {
-        let actor = Actor::new(2, Ping { delay: None });
-        let actor_ref = actor.get_user_actor_ref();
+        let mut actor_pool = ActorPool::new();
+        let actor_ref = actor_pool.new_actor(1, Ping { delay: None });
 
         let now = Instant::now();
         let _ = actor_ref.block(());
         println!("Elapsed: {:?}", now.elapsed());
 
-        let res = actor
-            .get_command_actor_ref()
-            .block(ActorCommandReq::Shutdown);
-        assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
-        assert!(actor.handle.join().unwrap().is_ok());
+        println!("Current {:?}", thread::current().id());
+
+        // Shutdown the actor pool
+        shutdown_actor_pool(actor_pool);
     }
 
     #[test]
     fn test_actor_multiple_messages() {
-        let actor = Actor::new(1, Ping { delay: None });
-        let actor_ref = actor.get_user_actor_ref();
+        let mut actor_pool = ActorPool::new();
+        let actor_ref = actor_pool.new_actor(1, Ping { delay: None });
 
         let actor_ref1 = actor_ref.clone();
         let actor_ref2 = actor_ref.clone();
@@ -153,23 +176,15 @@ mod tests {
         let _pong1 = actor_ref1.block(());
         let _pong2 = actor_ref2.block(());
 
-        let res = actor
-            .get_command_actor_ref()
-            .block(ActorCommandReq::Shutdown);
-        assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
-        assert!(actor.handle.join().unwrap().is_ok());
+        shutdown_actor_pool(actor_pool);
     }
 
     #[test]
     fn test_actor_send_after_shutdown_with_blocking() {
-        let actor = Actor::new(1, Ping { delay: None });
-        let actor_ref = actor.get_user_actor_ref();
+        let mut actor_pool = ActorPool::new();
+        let actor_ref = actor_pool.new_actor(1, Ping { delay: None });
 
-        let res = actor
-            .get_command_actor_ref()
-            .block(ActorCommandReq::Shutdown);
-        assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
-        assert!(actor.handle.join().unwrap().is_ok());
+        shutdown_actor_pool(actor_pool);
 
         let result = actor_ref.block(());
         assert!(result.is_err());
@@ -178,45 +193,23 @@ mod tests {
 
     #[test]
     fn test_actor_bad_behavior_with_blocking() {
-        let actor = Actor::new(1, SimulateThreadCrash);
-        let actor_ref = actor.get_user_actor_ref();
+        let mut actor_pool = ActorPool::new();
+        let actor_ref = actor_pool.new_actor(1, SimulateThreadCrash);
+
         let res = actor_ref.block(());
         assert!(res.is_err());
         assert!(matches!(res.err().unwrap(), ActorError::ActorInternalError));
 
-        let result = actor.handle.join();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_actor_bad_drop() {
-        let actor = Actor::new(1, Ping { delay: None });
-        drop(actor);
+        shutdown_actor_pool(actor_pool);
     }
 
     #[test]
     fn test_actor_bad_user_actor_drop() {
-        let actor = Actor::new(1, Ping { delay: None });
-        let Actor {
-            handle,
-            user_actor_ref,
-            command_actor_ref: _,
-        } = actor;
+        let mut actor_pool = ActorPool::new();
+        let actor_ref = actor_pool.new_actor(1, Ping { delay: None });
 
-        drop(user_actor_ref);
-        assert!(handle.join().unwrap().is_err());
-    }
+        drop(actor_ref);
 
-    #[test]
-    fn test_actor_bad_command_actor_drop() {
-        let actor = Actor::new(1, Ping { delay: None });
-        let Actor {
-            handle,
-            user_actor_ref: _,
-            command_actor_ref,
-        } = actor;
-
-        drop(command_actor_ref);
-        assert!(handle.join().unwrap().is_err());
+        shutdown_actor_pool(actor_pool);
     }
 }

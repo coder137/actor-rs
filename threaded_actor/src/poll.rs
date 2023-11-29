@@ -1,10 +1,10 @@
-use crossbeam::channel::{self, Receiver, Sender, TryRecvError, TrySendError};
+use std::sync::mpsc::{TryRecvError, TrySendError};
 
-use crate::ActorError;
+use crate::{create_channel, ActorError, ActorMessage, ActorReceiver, ActorSender};
 
 enum ActorRefPollState<Res> {
-    Start,                      // Try to send the request to Actor
-    RequestSent(Receiver<Res>), // Request sent successfully, waiting for response from Actor
+    Start,                           // Try to send the request to Actor
+    RequestSent(ActorReceiver<Res>), // Request sent successfully, waiting for response from Actor
     End(Result<ActorRefPollInfo, ActorError>),
 }
 
@@ -18,17 +18,17 @@ pub enum ActorRefPollInfo {
 
 pub struct ActorRefPollPromise<Req, Res> {
     req: Option<Req>,
-    channel: Option<(Sender<Res>, Receiver<Res>)>,
+    channel: Option<(ActorSender<Res>, ActorReceiver<Res>)>,
     res: Option<Res>,
-    tx: Sender<(Req, Sender<Res>)>,
+    tx: ActorSender<ActorMessage<Req, Res>>,
     state: ActorRefPollState<Res>,
 }
 
 impl<Req, Res> ActorRefPollPromise<Req, Res> {
-    pub fn new(req: Req, tx: Sender<(Req, Sender<Res>)>) -> Self {
+    pub fn new(req: Req, tx: ActorSender<ActorMessage<Req, Res>>) -> Self {
         Self {
             req: Some(req),
-            channel: Some(channel::bounded(1)),
+            channel: Some(create_channel(1)),
             res: None,
             tx,
             state: ActorRefPollState::Start,
@@ -106,13 +106,23 @@ mod tests {
     use super::*;
     use crate::{
         common_test_actors::{Ping, SimulateThreadCrash},
-        Actor, ActorCommandReq, ActorCommandRes,
+        ActorPool,
     };
+
+    fn shutdown_actor_pool(actor_pool: ActorPool) {
+        actor_pool.shutdown();
+        loop {
+            if actor_pool.is_shutdown() {
+                break;
+            }
+        }
+        assert!(actor_pool.is_shutdown());
+    }
 
     #[test]
     fn test_ping_poll() {
-        let actor = Actor::new(2, Ping { delay: None });
-        let actor_ref = actor.get_user_actor_ref();
+        let mut actor_pool = ActorPool::new();
+        let actor_ref = actor_pool.new_actor(2, Ping { delay: None });
 
         let now: Instant = Instant::now();
         let mut promise = actor_ref.as_poll(());
@@ -128,23 +138,20 @@ mod tests {
         assert!(promise.get_mut().is_some());
         assert!(promise.take().is_some());
 
-        let res = actor
-            .get_command_actor_ref()
-            .block(ActorCommandReq::Shutdown);
-        assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
-        assert!(actor.handle.join().unwrap().is_ok());
+        shutdown_actor_pool(actor_pool);
     }
 
     #[test]
     fn test_actor_queue_full() {
-        let actor = Actor::new(
+        let mut actor_pool = ActorPool::new();
+        let actor_ref = actor_pool.new_actor(
             1,
             Ping {
                 delay: Some(Duration::from_secs(5)),
             },
         );
-        let actor_ref1 = actor.get_user_actor_ref();
-        let actor_ref2 = actor.get_user_actor_ref();
+        let actor_ref1 = actor_ref.clone();
+        let actor_ref2 = actor_ref.clone();
 
         // Sends in queue
         let mut promise1 = actor_ref1.as_poll(());
@@ -159,17 +166,13 @@ mod tests {
         assert!(matches!(res2.unwrap(), ActorRefPollInfo::RequestQueueFull));
 
         // Shutdown
-        let res = actor
-            .get_command_actor_ref()
-            .block(ActorCommandReq::Shutdown);
-        assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
-        assert!(actor.handle.join().unwrap().is_ok());
+        shutdown_actor_pool(actor_pool);
     }
 
     #[test]
     fn test_actor_poll_after_complete() {
-        let actor = Actor::new(1, Ping { delay: None });
-        let actor_ref = actor.get_user_actor_ref();
+        let mut actor_pool = ActorPool::new();
+        let actor_ref = actor_pool.new_actor(1, Ping { delay: None });
 
         let mut promise = actor_ref.as_poll(());
         loop {
@@ -184,23 +187,15 @@ mod tests {
         assert!(matches!(promise.state, ActorRefPollState::End(..)));
 
         // Shutdown
-        let res = actor
-            .get_command_actor_ref()
-            .block(ActorCommandReq::Shutdown);
-        assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
-        assert!(actor.handle.join().unwrap().is_ok());
+        shutdown_actor_pool(actor_pool);
     }
 
     #[test]
     fn test_actor_send_after_shutdown_with_poll() {
-        let actor = Actor::new(1, Ping { delay: None });
-        let actor_ref = actor.get_user_actor_ref();
+        let mut actor_pool = ActorPool::new();
+        let actor_ref = actor_pool.new_actor(1, Ping { delay: None });
 
-        let res = actor
-            .get_command_actor_ref()
-            .block(ActorCommandReq::Shutdown);
-        assert!(matches!(res.unwrap(), ActorCommandRes::Shutdown));
-        assert!(actor.handle.join().unwrap().is_ok());
+        shutdown_actor_pool(actor_pool);
 
         let mut promise = actor_ref.as_poll(());
         let result = promise.poll_once();
@@ -210,8 +205,8 @@ mod tests {
 
     #[test]
     fn test_actor_bad_behavior_with_poll() {
-        let actor = Actor::new(1, SimulateThreadCrash);
-        let actor_ref = actor.get_user_actor_ref();
+        let mut actor_pool = ActorPool::new();
+        let actor_ref = actor_pool.new_actor(1, SimulateThreadCrash);
 
         let mut promise = actor_ref.as_poll(());
         loop {
@@ -221,7 +216,7 @@ mod tests {
                 break;
             }
         }
-        let result = actor.handle.join();
-        assert!(result.is_err());
+
+        shutdown_actor_pool(actor_pool);
     }
 }
