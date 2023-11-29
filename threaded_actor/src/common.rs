@@ -16,6 +16,17 @@ impl std::fmt::Display for ActorError {
 
 impl std::error::Error for ActorError {}
 
+// TODO, Make custom types for other channel types (crossbeam, flume etc)
+// TODO, Add them as features
+
+pub type ActorSender<T> = std::sync::mpsc::SyncSender<T>;
+pub type ActorReceiver<T> = std::sync::mpsc::Receiver<T>;
+pub type ActorMessage<Req, Res> = (Req, ActorSender<Res>);
+
+pub fn create_channel<T>(bound: usize) -> (ActorSender<T>, ActorReceiver<T>) {
+    std::sync::mpsc::sync_channel(bound)
+}
+
 #[cfg(test)]
 pub mod common_test_actors {
     use super::*;
