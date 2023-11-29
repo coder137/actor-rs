@@ -1,62 +1,11 @@
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
-        Arc,
-    },
-    thread::{self, JoinHandle},
-    time::Duration,
-};
-
 mod common;
 pub use common::*;
 
+mod actor_pool;
+pub use actor_pool::*;
+
 mod poll;
 pub use poll::*;
-
-pub struct ActorPool {
-    actors: Vec<JoinHandle<()>>,
-    shutdown: Arc<AtomicBool>,
-}
-
-impl ActorPool {
-    pub fn new() -> Self {
-        Self {
-            actors: Vec::new(),
-            shutdown: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    pub fn new_actor<Req, Res>(
-        &mut self,
-        bound: usize,
-        handler: impl ActorHandler<Req, Res> + Send + 'static,
-    ) -> ActorRef<Req, Res>
-    where
-        Req: Send + 'static,
-        Res: Send + 'static,
-    {
-        let (handle, actor_ref) = Actor::create(bound, handler, self.shutdown.clone());
-        self.actors.push(handle);
-        actor_ref
-    }
-
-    pub fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-    }
-
-    pub fn is_shutdown(&self) -> bool {
-        self.actors.iter().filter(|h| !h.is_finished()).count() == 0
-    }
-}
-
-type ActorSender<T> = SyncSender<T>;
-type ActorReceiver<T> = Receiver<T>;
-type ActorMessage<Req, Res> = (Req, ActorSender<Res>);
-
-fn create_channel<T>(bound: usize) -> (ActorSender<T>, ActorReceiver<T>) {
-    mpsc::sync_channel(bound)
-}
 
 pub struct ActorRef<Req, Res> {
     tx: ActorSender<ActorMessage<Req, Res>>,
@@ -88,57 +37,11 @@ impl<Req, Res> ActorRef<Req, Res> {
     }
 }
 
-pub enum ActorCommandReq {
-    Shutdown,
-}
-
-pub enum ActorCommandRes {
-    Shutdown,
-}
-
-pub struct Actor {}
-
-impl Actor {
-    pub fn create<Req, Res>(
-        bound: usize,
-        mut handler: impl ActorHandler<Req, Res> + Send + 'static,
-        shutdown_ind: Arc<AtomicBool>,
-    ) -> (JoinHandle<()>, ActorRef<Req, Res>)
-    where
-        Req: Send + 'static,
-        Res: Send + 'static,
-    {
-        let (user_tx, user_rx) = create_channel::<(Req, ActorSender<Res>)>(bound);
-        let handle = thread::spawn(move || {
-            //
-            println!("Current {:?}", thread::current().id());
-            loop {
-                // * The recv channel times out to check if this actor needs to shutdown
-                match user_rx.recv_timeout(Duration::from_secs(1)) {
-                    Ok((req, res_tx)) => {
-                        let res = handler.handle(req);
-                        let _ = res_tx.send(res);
-                    }
-                    Err(RecvTimeoutError::Timeout) => {
-                        if shutdown_ind.load(Ordering::Relaxed) {
-                            break;
-                        }
-                    }
-                    Err(RecvTimeoutError::Disconnected) => {
-                        break;
-                    }
-                }
-            }
-        });
-        (handle, ActorRef::new(user_tx))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::common_test_actors::{Ping, SimulateThreadCrash};
-    use std::time::Instant;
+    use std::{thread, time::Instant};
 
     fn shutdown_actor_pool(actor_pool: ActorPool) {
         actor_pool.shutdown();
