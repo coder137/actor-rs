@@ -1,8 +1,8 @@
 mod common;
 pub use common::*;
 
-mod actor_pool;
-pub use actor_pool::*;
+mod actor;
+pub use actor::*;
 
 mod poll;
 pub use poll::*;
@@ -46,8 +46,7 @@ mod lib_tests {
 
     #[test]
     fn test_ping() {
-        let mut actor_pool = ActorPool::new();
-        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(1, Ping { delay: None });
+        let (actor_ref, actor_drop_guard) = Actor::create(1, Ping { delay: None });
 
         let now = Instant::now();
         let _ = actor_ref.block(());
@@ -61,8 +60,7 @@ mod lib_tests {
 
     #[test]
     fn test_actor_multiple_messages() {
-        let mut actor_pool = ActorPool::new();
-        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(1, Ping { delay: None });
+        let (actor_ref, actor_drop_guard) = Actor::create(1, Ping { delay: None });
 
         let actor_ref1 = actor_ref.clone();
         let actor_ref2 = actor_ref.clone();
@@ -76,8 +74,7 @@ mod lib_tests {
 
     #[test]
     fn test_actor_send_after_shutdown_with_blocking() {
-        let mut actor_pool = ActorPool::new();
-        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(1, Ping { delay: None });
+        let (actor_ref, actor_drop_guard) = Actor::create(1, Ping { delay: None });
 
         // Shutdown
         drop(actor_drop_guard);
@@ -89,8 +86,7 @@ mod lib_tests {
 
     #[test]
     fn test_actor_bad_behavior_with_blocking() {
-        let mut actor_pool = ActorPool::new();
-        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(1, SimulateThreadCrash);
+        let (actor_ref, actor_drop_guard) = Actor::create(1, SimulateThreadCrash);
 
         let res = actor_ref.block(());
         assert!(res.is_err());
@@ -102,8 +98,7 @@ mod lib_tests {
 
     #[test]
     fn test_actor_bad_user_actor_drop() {
-        let mut actor_pool = ActorPool::new();
-        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(1, Ping { delay: None });
+        let (actor_ref, actor_drop_guard) = Actor::create(1, Ping { delay: None });
 
         drop(actor_ref);
 

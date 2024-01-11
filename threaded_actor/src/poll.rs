@@ -112,13 +112,12 @@ mod poll_tests {
     use super::*;
     use crate::{
         common_test_actors::{Ping, SimulateThreadCrash},
-        ActorPool,
+        Actor,
     };
 
     #[test]
     fn test_ping_poll() {
-        let mut actor_pool = ActorPool::new();
-        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(2, Ping { delay: None });
+        let (actor_ref, actor_drop_guard) = Actor::create(2, Ping { delay: None });
 
         let now: Instant = Instant::now();
         let mut promise = actor_ref.as_poll(());
@@ -139,8 +138,7 @@ mod poll_tests {
 
     #[test]
     fn test_actor_queue_full() {
-        let mut actor_pool = ActorPool::new();
-        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(
+        let (actor_ref, actor_drop_guard) = Actor::create(
             1,
             Ping {
                 delay: Some(Duration::from_secs(1)),
@@ -167,8 +165,7 @@ mod poll_tests {
 
     #[test]
     fn test_actor_poll_after_complete() {
-        let mut actor_pool = ActorPool::new();
-        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(1, Ping { delay: None });
+        let (actor_ref, actor_drop_guard) = Actor::create(1, Ping { delay: None });
 
         let mut promise = actor_ref.as_poll(());
         loop {
@@ -188,8 +185,7 @@ mod poll_tests {
 
     #[test]
     fn test_actor_send_after_shutdown_with_poll() {
-        let mut actor_pool = ActorPool::new();
-        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(1, Ping { delay: None });
+        let (actor_ref, actor_drop_guard) = Actor::create(1, Ping { delay: None });
 
         drop(actor_drop_guard);
 
@@ -201,8 +197,7 @@ mod poll_tests {
 
     #[test]
     fn test_actor_bad_behavior_with_poll() {
-        let mut actor_pool = ActorPool::new();
-        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(1, SimulateThreadCrash);
+        let (actor_ref, actor_drop_guard) = Actor::create(1, SimulateThreadCrash);
 
         let mut promise = actor_ref.as_poll(());
         loop {

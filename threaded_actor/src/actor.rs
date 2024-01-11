@@ -1,42 +1,11 @@
-use std::thread::{self, JoinHandle};
+use std::thread::{self};
 
 use crate::{create_channel, ActorDropGuard, ActorHandler, ActorMessage, ActorRef};
 
-pub struct ActorPool {
-    actors: Vec<JoinHandle<()>>,
-}
-
-impl ActorPool {
-    pub fn new() -> Self {
-        Self { actors: Vec::new() }
-    }
-
-    pub fn new_actor<Req, Res>(
-        &mut self,
-        bound: usize,
-        handler: impl ActorHandler<Req, Res> + Send + 'static,
-    ) -> (ActorRef<Req, Res>, ActorDropGuard<Req, Res>)
-    where
-        Req: Send + 'static,
-        Res: Send + 'static,
-    {
-        Actor::create(bound, handler)
-    }
-
-    pub fn shutdown(&self) {
-        // self.shutdown.store(true, Ordering::Relaxed);
-        todo!()
-    }
-
-    pub fn is_shutdown(&self) -> bool {
-        self.actors.iter().filter(|h| !h.is_finished()).count() == 0
-    }
-}
-
-struct Actor;
+pub struct Actor;
 
 impl Actor {
-    fn create<Req, Res>(
+    pub fn create<Req, Res>(
         bound: usize,
         mut handler: impl ActorHandler<Req, Res> + Send + 'static,
     ) -> (ActorRef<Req, Res>, ActorDropGuard<Req, Res>)
