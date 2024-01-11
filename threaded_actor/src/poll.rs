@@ -53,12 +53,15 @@ impl<Req, Res> ActorRefPollPromise<Req, Res> {
         match &self.state {
             ActorRefPollState::Start => {
                 let (tx, rx) = self.channel.take().unwrap();
-                match self.tx.try_send((self.req.take().unwrap(), tx)) {
+                match self
+                    .tx
+                    .try_send(ActorMessage::User((self.req.take().unwrap(), tx)))
+                {
                     Ok(_) => {
                         self.state = ActorRefPollState::RequestSent(rx);
                         Ok(ActorRefPollInfo::RequestSent)
                     }
-                    Err(TrySendError::Full((r, t))) => {
+                    Err(TrySendError::Full(ActorMessage::User((r, t)))) => {
                         // Same state
                         self.req = Some(r);
                         self.channel = Some((t, rx));
@@ -68,6 +71,9 @@ impl<Req, Res> ActorRefPollPromise<Req, Res> {
                         let result = Err(ActorError::ActorShutdown);
                         self.state = ActorRefPollState::End(result);
                         result
+                    }
+                    Err(TrySendError::Full(ActorMessage::Shutdown)) => {
+                        unreachable!()
                     }
                 }
             }
@@ -100,7 +106,7 @@ impl<Req, Res> ActorRefPollPromise<Req, Res> {
 }
 
 #[cfg(test)]
-mod tests {
+mod poll_tests {
     use std::time::{Duration, Instant};
 
     use super::*;
@@ -109,20 +115,10 @@ mod tests {
         ActorPool,
     };
 
-    fn shutdown_actor_pool(actor_pool: ActorPool) {
-        actor_pool.shutdown();
-        loop {
-            if actor_pool.is_shutdown() {
-                break;
-            }
-        }
-        assert!(actor_pool.is_shutdown());
-    }
-
     #[test]
     fn test_ping_poll() {
         let mut actor_pool = ActorPool::new();
-        let actor_ref = actor_pool.new_actor(2, Ping { delay: None });
+        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(2, Ping { delay: None });
 
         let now: Instant = Instant::now();
         let mut promise = actor_ref.as_poll(());
@@ -138,13 +134,13 @@ mod tests {
         assert!(promise.get_mut().is_some());
         assert!(promise.take().is_some());
 
-        shutdown_actor_pool(actor_pool);
+        drop(actor_drop_guard);
     }
 
     #[test]
     fn test_actor_queue_full() {
         let mut actor_pool = ActorPool::new();
-        let actor_ref = actor_pool.new_actor(
+        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(
             1,
             Ping {
                 delay: Some(Duration::from_secs(1)),
@@ -166,13 +162,13 @@ mod tests {
         assert!(matches!(res2.unwrap(), ActorRefPollInfo::RequestQueueFull));
 
         // Shutdown
-        shutdown_actor_pool(actor_pool);
+        drop(actor_drop_guard);
     }
 
     #[test]
     fn test_actor_poll_after_complete() {
         let mut actor_pool = ActorPool::new();
-        let actor_ref = actor_pool.new_actor(1, Ping { delay: None });
+        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(1, Ping { delay: None });
 
         let mut promise = actor_ref.as_poll(());
         loop {
@@ -187,15 +183,15 @@ mod tests {
         assert!(matches!(promise.state, ActorRefPollState::End(..)));
 
         // Shutdown
-        shutdown_actor_pool(actor_pool);
+        drop(actor_drop_guard);
     }
 
     #[test]
     fn test_actor_send_after_shutdown_with_poll() {
         let mut actor_pool = ActorPool::new();
-        let actor_ref = actor_pool.new_actor(1, Ping { delay: None });
+        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(1, Ping { delay: None });
 
-        shutdown_actor_pool(actor_pool);
+        drop(actor_drop_guard);
 
         let mut promise = actor_ref.as_poll(());
         let result = promise.poll_once();
@@ -206,7 +202,7 @@ mod tests {
     #[test]
     fn test_actor_bad_behavior_with_poll() {
         let mut actor_pool = ActorPool::new();
-        let actor_ref = actor_pool.new_actor(1, SimulateThreadCrash);
+        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(1, SimulateThreadCrash);
 
         let mut promise = actor_ref.as_poll(());
         loop {
@@ -217,6 +213,6 @@ mod tests {
             }
         }
 
-        shutdown_actor_pool(actor_pool);
+        drop(actor_drop_guard);
     }
 }

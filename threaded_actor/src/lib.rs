@@ -7,6 +7,7 @@ pub use actor_pool::*;
 mod poll;
 pub use poll::*;
 
+#[derive(Debug)]
 pub struct ActorRef<Req, Res> {
     tx: ActorSender<ActorMessage<Req, Res>>,
 }
@@ -26,7 +27,7 @@ impl<Req, Res> ActorRef<Req, Res> {
     pub fn block(&self, req: Req) -> Result<Res, ActorError> {
         let (tx, rx) = create_channel(1);
         self.tx
-            .send((req, tx))
+            .send(ActorMessage::User((req, tx)))
             .map_err(|_e| ActorError::ActorShutdown)?;
         let response = rx.recv().map_err(|_e| ActorError::ActorInternalError)?;
         Ok(response)
@@ -38,25 +39,15 @@ impl<Req, Res> ActorRef<Req, Res> {
 }
 
 #[cfg(test)]
-mod tests {
+mod lib_tests {
     use super::*;
     use crate::common_test_actors::{Ping, SimulateThreadCrash};
     use std::{thread, time::Instant};
 
-    fn shutdown_actor_pool(actor_pool: ActorPool) {
-        actor_pool.shutdown();
-        loop {
-            if actor_pool.is_shutdown() {
-                break;
-            }
-        }
-        assert!(actor_pool.is_shutdown());
-    }
-
     #[test]
     fn test_ping() {
         let mut actor_pool = ActorPool::new();
-        let actor_ref = actor_pool.new_actor(1, Ping { delay: None });
+        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(1, Ping { delay: None });
 
         let now = Instant::now();
         let _ = actor_ref.block(());
@@ -64,14 +55,14 @@ mod tests {
 
         println!("Current {:?}", thread::current().id());
 
-        // Shutdown the actor pool
-        shutdown_actor_pool(actor_pool);
+        // Shutdown
+        drop(actor_drop_guard);
     }
 
     #[test]
     fn test_actor_multiple_messages() {
         let mut actor_pool = ActorPool::new();
-        let actor_ref = actor_pool.new_actor(1, Ping { delay: None });
+        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(1, Ping { delay: None });
 
         let actor_ref1 = actor_ref.clone();
         let actor_ref2 = actor_ref.clone();
@@ -79,15 +70,17 @@ mod tests {
         let _pong1 = actor_ref1.block(());
         let _pong2 = actor_ref2.block(());
 
-        shutdown_actor_pool(actor_pool);
+        // Shutdown
+        drop(actor_drop_guard);
     }
 
     #[test]
     fn test_actor_send_after_shutdown_with_blocking() {
         let mut actor_pool = ActorPool::new();
-        let actor_ref = actor_pool.new_actor(1, Ping { delay: None });
+        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(1, Ping { delay: None });
 
-        shutdown_actor_pool(actor_pool);
+        // Shutdown
+        drop(actor_drop_guard);
 
         let result = actor_ref.block(());
         assert!(result.is_err());
@@ -97,22 +90,24 @@ mod tests {
     #[test]
     fn test_actor_bad_behavior_with_blocking() {
         let mut actor_pool = ActorPool::new();
-        let actor_ref = actor_pool.new_actor(1, SimulateThreadCrash);
+        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(1, SimulateThreadCrash);
 
         let res = actor_ref.block(());
         assert!(res.is_err());
         assert!(matches!(res.err().unwrap(), ActorError::ActorInternalError));
 
-        shutdown_actor_pool(actor_pool);
+        // Shutdown
+        drop(actor_drop_guard);
     }
 
     #[test]
     fn test_actor_bad_user_actor_drop() {
         let mut actor_pool = ActorPool::new();
-        let actor_ref = actor_pool.new_actor(1, Ping { delay: None });
+        let (actor_ref, actor_drop_guard) = actor_pool.new_actor(1, Ping { delay: None });
 
         drop(actor_ref);
 
-        shutdown_actor_pool(actor_pool);
+        // Shutdown
+        drop(actor_drop_guard);
     }
 }
