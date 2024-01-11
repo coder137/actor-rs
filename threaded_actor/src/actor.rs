@@ -13,18 +13,10 @@ impl Actor {
         Req: Send + 'static,
         Res: Send + 'static,
     {
-        // let (user_tx, user_rx) = create_channel::<(Req, ActorSender<Res>)>(bound);
         let (user_tx, user_rx) = create_channel::<ActorMessage<Req, Res>>(bound);
         let handle = thread::spawn(move || {
             loop {
-                let message = match user_rx.recv() {
-                    Ok(message) => message,
-                    Err(_) => {
-                        // TODO, Notify about closed channel
-                        break;
-                    }
-                };
-
+                let message = user_rx.recv().expect("ActorDropGuard should ensure that tx channel is not dropped before shutting down Actor thread");
                 match message {
                     ActorMessage::User((req, res_tx)) => {
                         let res = handler.handle(req);
