@@ -106,7 +106,7 @@ impl<Req, Res> ActorRefPollPromise<Req, Res> {
 }
 
 #[cfg(test)]
-mod poll_tests {
+mod actor_ref_poll_tests {
     use std::time::{Duration, Instant};
 
     use super::*;
