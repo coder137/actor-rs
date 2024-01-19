@@ -46,7 +46,8 @@ impl MyActor {
 
     // // NO self parameter is present
     // pub fn impure_function_add(data: usize) {
-    //     // This add is technically safe since it is ordered
+    //     // This add is unsafe even if it is ordered
+    //     // This is because multiple actors / functions can mutate global state
     //     unsafe { DATA += data };
     // }
 
