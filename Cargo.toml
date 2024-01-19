@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["threaded_actor"]
+members = ["threaded_actor", "actor_macros"]
