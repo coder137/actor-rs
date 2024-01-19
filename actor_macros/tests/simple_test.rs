@@ -17,8 +17,6 @@ impl<Req, Res> ActorRef<Req, Res> {
     }
 }
 
-// User implemented
-
 struct MyActor {
     data: usize,
 }
@@ -57,8 +55,32 @@ impl MyActor {
 }
 
 #[test]
-fn test_my_actor() {
-    // let mut actor_pool = ActorPool::new();
+fn test_threaded_macro_simple() {
+    let (actor_ref, _actor_drop_guard) = Actor::create(1, MyActor { data: 1 });
+
+    // 1
+    let response = actor_ref.block(MyActorReq::ping());
+    assert!(response.is_ok());
+    assert!(matches!(response.unwrap(), MyActorRes::ping(..)));
+
+    // 2
+    let response = actor_ref.block(MyActorReq::get_data());
+    assert!(response.is_ok());
+    assert!(matches!(response.unwrap(), MyActorRes::get_data(data) if data == 1));
+
+    // 3
+    let response = actor_ref.block(MyActorReq::simple_add(11));
+    assert!(response.is_ok());
+    assert!(matches!(response.unwrap(), MyActorRes::simple_add(data) if data == 12));
+
+    // 4
+    let response = actor_ref.block(MyActorReq::get_data());
+    assert!(response.is_ok());
+    assert!(matches!(response.unwrap(), MyActorRes::get_data(data) if data == 12));
+}
+
+#[test]
+fn test_threaded_macro_generated_my_actor_ref() {
     let (actor_ref, _actor_drop_guard) = Actor::create(1, MyActor { data: 1 });
 
     let my_actor_ref = MyActorRef::from(actor_ref);
